@@ -20,6 +20,8 @@ class LauncherTests(unittest.TestCase):
             shutil.copytree(SCRIPT.parent.parent, package, ignore=shutil.ignore_patterns('__pycache__'))
             home = root / '用户资料 Codex'
             home.mkdir()
+            (home/'.codex-global-state.json').write_text(json.dumps({'electron-persisted-atom-state': {
+                'unread-thread-ids-by-host-v1': {'local': []}}}), encoding='utf-8')
             with sqlite3.connect(home/'state_5.sqlite') as db:
                 db.execute('CREATE TABLE threads (id TEXT, name TEXT, title TEXT, source TEXT, archived INTEGER, rollout_path TEXT)')
                 log = home/'session.jsonl'
@@ -45,6 +47,8 @@ class LauncherTests(unittest.TestCase):
     def test_start_reuses_process_and_stop_only_its_instance(self):
         with tempfile.TemporaryDirectory() as directory:
             home = Path(directory)
+            (home/'.codex-global-state.json').write_text(json.dumps({'electron-persisted-atom-state': {
+                'unread-thread-ids-by-host-v1': {'local': []}}}), encoding='utf-8')
             with sqlite3.connect(home/'state_5.sqlite') as db:
                 db.execute('CREATE TABLE threads (id TEXT, name TEXT, title TEXT, source TEXT, archived INTEGER, rollout_path TEXT)')
             db.close()

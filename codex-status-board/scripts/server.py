@@ -106,7 +106,7 @@ class BoardServer(ThreadingHTTPServer):
         if time.time() - snapshot['updated_at'] > 10:
             snapshot['error'] = '状态更新已暂停'
         if snapshot.get('error'):
-            snapshot['sessions'] = [{**s, 'status': 'unknown', 'label': '状态待确认'} for s in snapshot['sessions']]
+            snapshot['sessions'] = []
         return snapshot
 
     def server_close(self):

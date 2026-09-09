@@ -3,6 +3,7 @@ import json
 import sys
 import tempfile
 import threading
+import time
 import unittest
 from unittest.mock import patch
 from pathlib import Path
@@ -67,6 +68,14 @@ class ServerTests(unittest.TestCase):
         self.assertEqual(self.request('/api/stop', 'POST')[0], 403)
         self.assertEqual(self.request('/api/stop', 'POST', {'X-Board-Token':'wrong'})[0], 403)
         self.assertEqual(self.request('/health')[0], 200)
+
+    def test_stale_snapshot_cannot_show_old_running_or_completed_tiles(self):
+        with self.server._lock:
+            self.server._snapshot = {'updated_at': time.time() - 30, 'error': None,
+                'sessions': [{'id': 'old', 'status': 'completed'}]}
+        data = json.loads(self.request('/api/snapshot')[2])
+        self.assertTrue(data['error'])
+        self.assertEqual(data['sessions'], [])
 
 
 if __name__ == '__main__':

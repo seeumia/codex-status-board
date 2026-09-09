@@ -8,7 +8,7 @@ from pathlib import Path
 
 
 LABELS = {
-    'running': '正在开发', 'completed': '本轮结束', 'waiting': '等待你处理',
+    'running': '正在开发', 'completed': '本轮完成 · 待阅读', 'waiting': '等待你处理',
     'interrupted': '已中断', 'failed': '运行出错', 'unknown': '状态待确认',
 }
 BOUNDARIES = {'task_started', 'task_complete', 'turn_aborted'}
@@ -150,6 +150,7 @@ class Monitor:
         self.started_at = time.time()
         self.readers = {}
         self.shown = {}
+        self.held_completions = {}
         self.initialized = False
 
     def metadata(self):
@@ -164,25 +165,44 @@ class Monitor:
             if not {'id', 'title', 'source', 'archived', 'rollout_path'} <= columns:
                 raise ValueError('当前 Codex 记录格式尚不支持')
             name = 'name' if 'name' in columns else 'NULL AS name'
-            rows = conn.execute(f'SELECT id, {name}, title, source, rollout_path FROM threads WHERE archived=0').fetchall()
+            # Use the app's task origin, not its title: automation runs can have
+            # the same display name as an ordinary development conversation.
+            ordinary = " AND COALESCE(thread_source, '') != 'automation'" if 'thread_source' in columns else ''
+            rows = conn.execute(f'SELECT id, {name}, title, source, rollout_path FROM threads WHERE archived=0{ordinary}').fetchall()
             return [dict(r) for r in rows if not str(r['source']).startswith('{') and r['source'] != 'subagent']
+
+    def unread_ids(self):
+        """Follow the desktop app's persisted unread flag; never mark tasks read here."""
+        try:
+            state = json.loads((self.home / '.codex-global-state.json').read_text(encoding='utf-8'))
+            hosts = state['electron-persisted-atom-state']['unread-thread-ids-by-host-v1']
+            if not isinstance(hosts, dict):
+                raise ValueError
+            ids = hosts.get('local', [])
+            if not isinstance(ids, list) or not all(isinstance(key, str) for key in ids):
+                raise ValueError
+            return set(ids)
+        except (OSError, ValueError, KeyError, TypeError):
+            raise ValueError('暂时无法读取 Codex 已读状态，恢复后自动更新') from None
 
     def snapshot(self):
         now = time.time()
         try:
             rows = self.metadata()
+            unread = self.unread_ids()
         except (sqlite3.Error, OSError, ValueError) as exc:
             note = str(exc) if isinstance(exc, ValueError) else '暂时无法读取 Codex 会话列表'
-            sessions = [{**s, 'status': 'unknown', 'label': LABELS['unknown'], 'note': note} for s in self.shown.values()]
-            return {'updated_at': now, 'error': note, 'sessions': sessions, 'warnings': 0}
+            return {'updated_at': now, 'error': note, 'sessions': [], 'warnings': 0}
         live_ids = {row['id'] for row in rows}
         self.shown = {k: v for k, v in self.shown.items() if k in live_ids}
         self.readers = {k: v for k, v in self.readers.items() if k in live_ids}
+        self.held_completions = {k: v for k, v in self.held_completions.items() if k in live_ids}
         warnings = 0
         for row in rows:
             key = row['id']
             reader = self.readers.get(key)
             prior_turn = reader.turn_id if reader else None
+            prior_status = reader.status if reader else None
             if not reader or reader.path != Path(row['rollout_path']):
                 reader = Rollout(row['rollout_path'])
                 self.readers[key] = reader
@@ -190,13 +210,32 @@ class Monitor:
             new_turn = self.initialized and reader.turn_id and reader.turn_id != prior_turn
             # Codex's started_at is second-resolution; compare at the same precision.
             fresh = isinstance(reader.started_at, (int, float)) and reader.started_at >= int(self.started_at)
+            if key in self.held_completions and (
+                reader.turn_id != self.held_completions[key] or reader.status != 'completed'
+            ):
+                self.held_completions.pop(key)
+            new_completion = self.initialized and status == 'completed' and (
+                prior_status == 'running' or (new_turn and fresh)
+            )
+            if new_completion and key not in unread:
+                # The desktop auto-marks a visible task read on completion. That
+                # flag alone cannot prove the user came back to read the result.
+                # Keep it until the next lifecycle state; reliable re-entry events
+                # are not available from the read-only files used by this service.
+                self.held_completions[key] = reader.turn_id
             if status == 'unknown':
                 warnings += 1
-            if key in self.shown or reader.status == 'running' or (new_turn and fresh):
+            if key in self.shown or status == 'running' or (new_turn and fresh) or (
+                status == 'completed' and key in unread
+            ):
                 title = (row['name'] or row['title'] or '未命名会话').strip().split('\n')[0][:120]
                 self.shown[key] = {
                     'id': key, 'title': title, 'status': status, 'label': LABELS[status],
-                    'note': note, 'started_at': reader.started_at,
+                    'note': '暂时保留，避免漏读' if key in self.held_completions else note,
+                    'started_at': reader.started_at,
                 }
         self.initialized = True
-        return {'updated_at': now, 'error': None, 'warnings': warnings, 'sessions': list(self.shown.values())}
+        sessions = [s for s in self.shown.values() if s['status'] == 'running'
+                    or (s['status'] == 'completed' and (
+                        s['id'] in unread or s['id'] in self.held_completions))]
+        return {'updated_at': now, 'error': None, 'warnings': warnings, 'sessions': sessions}
