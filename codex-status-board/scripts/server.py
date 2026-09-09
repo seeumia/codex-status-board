@@ -12,7 +12,7 @@ from socketserver import TCPServer
 from status_reader import Monitor
 
 SERVICE = 'codex-status-board'
-VERSION = '0.1.0'
+VERSION = '0.2.0'
 PAGE = Path(__file__).resolve().parents[1] / 'assets/index.html'
 
 
@@ -106,7 +106,8 @@ class BoardServer(ThreadingHTTPServer):
         if time.time() - snapshot['updated_at'] > 10:
             snapshot['error'] = '状态更新已暂停'
         if snapshot.get('error'):
-            snapshot['sessions'] = [{**s, 'status': 'unknown', 'label': '状态待确认'} for s in snapshot['sessions']]
+            snapshot['sessions'] = []
+            snapshot['attention'] = []
         return snapshot
 
     def server_close(self):

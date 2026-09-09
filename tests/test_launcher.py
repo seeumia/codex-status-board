@@ -39,6 +39,7 @@ class LauncherTests(unittest.TestCase):
                     starts = list(pool.map(call, ['start'] * 3))
                 self.assertEqual(len({r['pid'] for r in starts}), 1)
                 self.assertTrue(all(r['running'] and r['error'] is None and r['sessions'] == 1 for r in starts))
+                self.assertTrue(all(r.get('read_state_error') for r in starts), 'Missing desktop read state must be reported')
             finally:
                 call('stop')
 

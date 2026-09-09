@@ -68,6 +68,16 @@ class ServerTests(unittest.TestCase):
         self.assertEqual(self.request('/api/stop', 'POST', {'X-Board-Token':'wrong'})[0], 403)
         self.assertEqual(self.request('/health')[0], 200)
 
+    def test_stale_snapshot_never_keeps_status_tiles(self):
+        self.server._snapshot = {
+            'updated_at': 0, 'error': None,
+            'sessions': [{'id': 'one', 'status': 'completed'}],
+            'attention': [], 'read_state_error': None,
+        }
+        snapshot = json.loads(self.request('/api/snapshot')[2])
+        self.assertTrue(snapshot['error'])
+        self.assertEqual(snapshot['sessions'], [])
+
 
 if __name__ == '__main__':
     unittest.main()

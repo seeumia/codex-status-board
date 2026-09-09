@@ -8,7 +8,7 @@ from pathlib import Path
 
 
 LABELS = {
-    'running': '正在开发', 'completed': '本轮结束', 'waiting': '等待你处理',
+    'running': '开发中', 'completed': '已开发完未读', 'waiting': '等待你处理',
     'interrupted': '已中断', 'failed': '运行出错', 'unknown': '状态待确认',
 }
 BOUNDARIES = {'task_started', 'task_complete', 'turn_aborted'}
@@ -147,10 +147,21 @@ class Rollout:
 class Monitor:
     def __init__(self, codex_home):
         self.home = Path(codex_home).expanduser().resolve()
-        self.started_at = time.time()
         self.readers = {}
-        self.shown = {}
-        self.initialized = False
+
+    def unread_ids(self):
+        """Use the desktop's local-host read state, never infer or modify it."""
+        data = json.loads((self.home / '.codex-global-state.json').read_text(encoding='utf-8'))
+        try:
+            by_host = data['electron-persisted-atom-state']['unread-thread-ids-by-host-v1']
+        except (KeyError, TypeError):
+            raise ValueError('Unsupported read-state format') from None
+        if not isinstance(by_host, dict):
+            raise ValueError('Unsupported read-state hosts')
+        ids = by_host.get('local', [])
+        if not isinstance(ids, list) or not all(isinstance(key, str) for key in ids):
+            raise ValueError('Unsupported unread IDs')
+        return set(ids)
 
     def metadata(self):
         candidates = [p for p in self.home.glob('state_*.sqlite') if p.stem[6:].isdigit()]
@@ -173,30 +184,36 @@ class Monitor:
             rows = self.metadata()
         except (sqlite3.Error, OSError, ValueError) as exc:
             note = str(exc) if isinstance(exc, ValueError) else '暂时无法读取 Codex 会话列表'
-            sessions = [{**s, 'status': 'unknown', 'label': LABELS['unknown'], 'note': note} for s in self.shown.values()]
-            return {'updated_at': now, 'error': note, 'sessions': sessions, 'warnings': 0}
+            return {'updated_at': now, 'error': note, 'sessions': [], 'attention': [], 'warnings': 0,
+                    'read_state_error': None}
+        read_state_error = None
+        try:
+            unread = self.unread_ids()
+        except (OSError, ValueError):
+            unread = set()
+            read_state_error = '暂时无法读取 Codex 已读状态，已完成任务暂不显示'
         live_ids = {row['id'] for row in rows}
-        self.shown = {k: v for k, v in self.shown.items() if k in live_ids}
         self.readers = {k: v for k, v in self.readers.items() if k in live_ids}
         warnings = 0
+        sessions, attention = [], []
         for row in rows:
             key = row['id']
             reader = self.readers.get(key)
-            prior_turn = reader.turn_id if reader else None
             if not reader or reader.path != Path(row['rollout_path']):
                 reader = Rollout(row['rollout_path'])
                 self.readers[key] = reader
             status, note = reader.read(now)
-            new_turn = self.initialized and reader.turn_id and reader.turn_id != prior_turn
-            # Codex's started_at is second-resolution; compare at the same precision.
-            fresh = isinstance(reader.started_at, (int, float)) and reader.started_at >= int(self.started_at)
             if status == 'unknown':
                 warnings += 1
-            if key in self.shown or reader.status == 'running' or (new_turn and fresh):
+            if reader.status == 'running' or key in unread:
                 title = (row['name'] or row['title'] or '未命名会话').strip().split('\n')[0][:120]
-                self.shown[key] = {
+                task = {
                     'id': key, 'title': title, 'status': status, 'label': LABELS[status],
                     'note': note, 'started_at': reader.started_at,
                 }
-        self.initialized = True
-        return {'updated_at': now, 'error': None, 'warnings': warnings, 'sessions': list(self.shown.values())}
+                if status in ('running', 'completed'):
+                    sessions.append(task)
+                else:
+                    attention.append(task)
+        return {'updated_at': now, 'error': None, 'warnings': warnings, 'sessions': sessions,
+                'attention': attention, 'read_state_error': read_state_error}

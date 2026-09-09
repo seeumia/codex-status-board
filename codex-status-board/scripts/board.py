@@ -115,6 +115,7 @@ def main():
             url = f'http://127.0.0.1:{state["port"]}'
             snapshot = request(state['port'], '/api/snapshot')
             result.update(url=url, pid=state['pid'], sessions=len(snapshot['sessions']), error=snapshot['error'])
+            result.update(read_state_error=snapshot.get('read_state_error'), attention=len(snapshot.get('attention', [])))
             if args.open:
                 result['browser_open_requested'] = bool(webbrowser.open(url))
         print(json.dumps(result, ensure_ascii=False))

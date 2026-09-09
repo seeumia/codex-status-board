@@ -13,7 +13,7 @@ header{display:flex;align-items:center;gap:24px;flex-wrap:wrap}h1{font-size:24px
 main{flex:1;min-height:0;display:flex;flex-direction:column;gap:var(--tile-gap,18px)}
 .tile-row{flex:1;min-height:0;display:flex;gap:inherit}
 .tile{flex:1;border-radius:var(--tile-radius,14px);padding:var(--tile-padding,24px);display:flex;flex-direction:column;justify-content:center;min-width:0;min-height:0;overflow:hidden;position:relative}
-.running{background:#c52b36}.completed{background:#14713c}.waiting,.interrupted,.failed{background:#94590a}.unknown{background:#494d55}
+.running{background:#c52b36}.completed{background:#14713c}
 .tile h2{flex-shrink:0;font-size:var(--title-size,60px);line-height:1.22;overflow-wrap:anywhere;margin:0 0 .5em;font-weight:750;display:-webkit-box;-webkit-line-clamp:4;-webkit-box-orient:vertical;overflow:hidden}
 .state{flex-shrink:0;font-size:var(--state-size,28px);font-weight:600;display:flex;align-items:center;gap:.45em;line-height:1.3;white-space:nowrap}.symbol{font-size:1.15em}.note{flex-shrink:0;font-size:var(--note-size,18px);line-height:1.3;opacity:.9;margin-top:.5em}
 .empty{flex:1;min-height:0;display:flex;align-items:center;justify-content:center;text-align:center;flex-direction:column;color:#b5bac3;border:2px dashed #343a43;border-radius:14px;padding:32px}.empty h2{font-size:clamp(28px,4vw,56px);color:#e8ebef;margin:0 0 20px}.empty p{font-size:22px;margin:0;line-height:1.6}
@@ -25,12 +25,12 @@ footer{display:flex;justify-content:space-between;gap:14px;font-size:15px;color:
 <header><h1>Codex 开发状态</h1><span id="summary" aria-live="polite">正在连接…</span><button id="fullscreen" type="button">进入全屏</button></header>
 <div id="alert" role="status" hidden></div>
 <main id="board" aria-label="会话状态看板"></main>
-<footer><div class="legend"><span><i class="dot red"></i>开发中</span><span><i class="dot green"></i>本轮结束</span><span><i class="dot yellow"></i>需要关注</span></div><span id="updated">每 2 秒自动更新</span><span>绿色表示本轮结束，不代表项目验收</span></footer>
+<footer><div class="legend"><span><i class="dot red"></i>开发中</span><span><i class="dot green"></i>已开发完未读</span></div><span id="updated">每 2 秒自动更新</span><span>已读状态跟随 Codex · 绿色不代表项目验收</span></footer>
 <script>
 'use strict';
 const board=document.querySelector('#board'), alertBox=document.querySelector('#alert');
 const summary=document.querySelector('#summary'), updated=document.querySelector('#updated');
-const symbols={running:'●',completed:'✓',waiting:'!',interrupted:'Ⅱ',failed:'!',unknown:'?'};
+const symbols={running:'●',completed:'✓'};
 let lastSessions=[], lastSuccess=0, renderKey='', hasError=false;
 function layout(){
  const tiles=Array.from(board.querySelectorAll('.tile')),n=tiles.length;
@@ -77,28 +77,31 @@ function layout(){
   }
  }
 }
-function render(sessions,error=''){
+function render(sessions,error='',attention=[],readStateError=''){
+ sessions=error?[]:sessions.filter(s=>Object.hasOwn(symbols,s.status));
  lastSessions=sessions;hasError=Boolean(error);
- alertBox.hidden=!error;alertBox.textContent=error;
- const counts={running:0,completed:0,attention:0};
- for(const s of sessions){if(!error&&s.status==='running')counts.running++;else if(!error&&s.status==='completed')counts.completed++;else counts.attention++;}
- summary.textContent=`${counts.running} 个开发中 · ${counts.completed} 个已结束`+(counts.attention?` · ${counts.attention} 个需关注`:'');
- const key=JSON.stringify([sessions,error]);
+ const details=attention.slice(0,2).map(s=>`${s.title.slice(0,30)}：${s.label}`).join('；');
+ const notice=error||[readStateError,attention.length?`${attention.length} 个任务需要关注：${details}${attention.length>2?' 等':''}`:''].filter(Boolean).join('。');
+ alertBox.hidden=!notice;alertBox.textContent=notice;
+ const counts={running:0,completed:0};
+ for(const s of sessions)counts[s.status]++;
+ summary.textContent=error?'状态暂不可用':`${counts.running} 个开发中 · ${counts.completed} 个已开发完未读`;
+ const key=JSON.stringify([sessions,error,attention,readStateError]);
  if(key!==renderKey){
   renderKey=key;board.replaceChildren();
   if(!sessions.length){
    const empty=document.createElement('section');empty.className='empty';
-   const title=document.createElement('h2');title.textContent=error?'暂时无法确认开发状态':'等待会话开始工作';
-   const text=document.createElement('p');text.textContent=error?'连接恢复后，看板会自动更新。':'新开始的会话会自动出现在这里，结束后保留绿色色块。';
+   const title=document.createElement('h2');title.textContent=error?'暂时无法确认开发状态':readStateError?'暂时无法确认未读任务':attention.length?'有任务需要你处理':'暂无开发中或未读完成任务';
+   const text=document.createElement('p');text.textContent=error?'连接恢复后，看板会自动更新。':readStateError?'Codex 已读记录恢复后，会自动重新筛选。':attention.length?'请在 Codex 中查看顶部提示的任务。':'新任务会自动出现；在 Codex 中已读后，完成任务会自动移出。';
    empty.append(title,text);board.append(empty);
   }
   for(const session of sessions){
-   const status=error?'unknown':(Object.hasOwn(symbols,session.status)?session.status:'unknown');
+   const status=session.status;
    const tile=document.createElement('article');tile.className='tile '+status;tile.dataset.sessionId=session.id;tile.dataset.status=status;
    const name=document.createElement('h2');name.textContent=session.title;name.title=session.title;
    const state=document.createElement('div');state.className='state';
    const icon=document.createElement('span');icon.className='symbol';icon.setAttribute('aria-hidden','true');icon.textContent=symbols[status];
-   const label=document.createElement('span');label.textContent=error?'状态待确认':session.label;state.append(icon,label);tile.append(name,state);
+   const label=document.createElement('span');label.textContent=session.label;state.append(icon,label);tile.append(name,state);
    if(session.note&&!error){const note=document.createElement('div');note.className='note';note.textContent=session.note;tile.append(note);}
    board.append(tile);
   }
@@ -112,7 +115,7 @@ async function refresh(){
   const data=await response.json();
   if(!Array.isArray(data.sessions)||typeof data.updated_at!=='number')throw new Error('format');
   const stale=Date.now()/1000-data.updated_at>10;
-  lastSuccess=Date.now();render(data.sessions,data.error||(stale?'状态更新已暂停，请检查本机看板进程。':''));
+  lastSuccess=Date.now();render(data.sessions,data.error||(stale?'状态更新已暂停，请检查本机看板进程。':''),data.attention||[],data.read_state_error||'');
   updated.textContent='更新于 '+new Date(data.updated_at*1000).toLocaleTimeString('zh-CN',{hour12:false})+' · 每 2 秒刷新';
  }catch(_){render(lastSessions,'看板连接已中断，恢复后会自动更新。');updated.textContent='连接中断 · 正在重试';}
  finally{setTimeout(refresh,2000);}
