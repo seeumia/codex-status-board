@@ -7,6 +7,7 @@ import threading
 import time
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
+from socketserver import TCPServer
 
 from status_reader import Monitor
 
@@ -71,6 +72,12 @@ class Handler(BaseHTTPRequestHandler):
 
 class BoardServer(ThreadingHTTPServer):
     daemon_threads = True
+
+    def server_bind(self):
+        # This loopback-only service needs no reverse DNS lookup. HTTPServer's
+        # default getfqdn can block startup while a system resolver times out.
+        TCPServer.server_bind(self)
+        self.server_name, self.server_port = self.server_address[:2]
 
     def __init__(self, codex_home, token, port=17329):
         self.token = token

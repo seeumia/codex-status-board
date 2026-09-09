@@ -4,10 +4,24 @@ import sys
 import tempfile
 import threading
 import unittest
+from unittest.mock import patch
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / 'codex-status-board/scripts'))
 from server import BoardServer
+
+
+class StartupTests(unittest.TestCase):
+    def test_loopback_startup_does_not_resolve_a_hostname(self):
+        with tempfile.TemporaryDirectory() as home:
+            with patch('socket.getfqdn', return_value='localhost') as resolver:
+                server = BoardServer(Path(home), 'test-secret', port=0)
+            try:
+                self.assertEqual(server.server_address[0], '127.0.0.1')
+                self.assertGreater(server.server_address[1], 0)
+                resolver.assert_not_called()
+            finally:
+                server.server_close()
 
 
 class ServerTests(unittest.TestCase):
