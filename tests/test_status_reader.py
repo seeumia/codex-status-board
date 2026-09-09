@@ -6,6 +6,7 @@ import sys
 import tempfile
 import time
 import unittest
+from unittest.mock import patch
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / 'codex-status-board/scripts'))
@@ -21,6 +22,9 @@ class MonitorTests(unittest.TestCase):
         self.addCleanup(self.db.close)
         self.db.execute('CREATE TABLE threads (id TEXT PRIMARY KEY, name TEXT, title TEXT, source TEXT, archived INTEGER, rollout_path TEXT)')
         self.paths = {}
+        selection = patch('status_reader.selected_title', return_value=None)
+        selection.start()
+        self.addCleanup(selection.stop)
 
     def thread(self, name='one', source='vscode', archived=0):
         p = self.home / (name + '.jsonl')
@@ -40,6 +44,11 @@ class MonitorTests(unittest.TestCase):
 
     def status(self, monitor):
         return monitor.snapshot()['sessions'][0]['status']
+
+    def hidden_status(self, monitor):
+        # These lifecycle states are still parsed, but no longer rendered as tiles.
+        self.assertEqual(monitor.snapshot()['sessions'], [])
+        return monitor.readers['one'].read(time.time())[0]
 
     def test_running_finished_and_running_again(self):
         self.thread(); self.event('task_started')
@@ -62,8 +71,11 @@ class MonitorTests(unittest.TestCase):
     def test_new_short_session_in_startup_second_is_not_missed(self):
         m = Monitor(self.home); m.snapshot()
         self.thread()
-        self.event('task_started', started_at=int(m.started_at))
-        self.event('task_complete', started_at=int(m.started_at))
+        self.event('task_started', started_at=int(time.time()))
+        self.event('task_complete', started_at=int(time.time()))
+        (self.home / '.codex-global-state.json').write_text(json.dumps({
+            'electron-persisted-atom-state': {'unread-thread-ids-by-host-v1': {'local': ['one']}}
+        }), encoding='utf-8')
         self.assertEqual([s['status'] for s in m.snapshot()['sessions']], ['completed'])
 
     def test_subagents_and_archives_not_displayed(self):
@@ -77,7 +89,7 @@ class MonitorTests(unittest.TestCase):
         self.thread(); self.event('task_started')
         m = Monitor(self.home); m.snapshot()
         self.event('turn_aborted')
-        self.assertEqual(self.status(m), 'interrupted')
+        self.assertEqual(self.hidden_status(m), 'interrupted')
 
     def test_incomplete_line_waits_until_newline(self):
         p = self.thread(); self.event('task_started')
@@ -103,23 +115,23 @@ class MonitorTests(unittest.TestCase):
         replacement = p.with_suffix('.new')
         replacement.write_text(json.dumps({'type':'event_msg','payload':{'type':'turn_aborted','turn_id':'t1'}})+'\n')
         replacement.replace(p)
-        self.assertEqual(self.status(m), 'interrupted')
+        self.assertEqual(self.hidden_status(m), 'interrupted')
 
     def test_corrupt_or_missing_data_never_keeps_green(self):
         p = self.thread(); self.event('task_started')
         m = Monitor(self.home); m.snapshot(); self.event('task_complete')
         self.assertEqual(self.status(m), 'completed')
         with p.open('a') as f: f.write('{bad json}\n')
-        self.assertEqual(self.status(m), 'unknown')
+        self.assertEqual(self.hidden_status(m), 'unknown')
         p.unlink()
-        self.assertEqual(self.status(m), 'unknown')
+        self.assertEqual(self.hidden_status(m), 'unknown')
 
     def test_stale_running_is_unknown_and_recovers(self):
         p = self.thread(); self.event('task_started')
         m = Monitor(self.home)
         old = time.time() - 400
         os.utime(p, (old, old))
-        self.assertEqual(self.status(m), 'unknown')
+        self.assertEqual(self.hidden_status(m), 'unknown')
         self.write({'type':'event_msg','payload':{'type':'token_count'}})
         self.assertEqual(self.status(m), 'running')
 
@@ -127,7 +139,7 @@ class MonitorTests(unittest.TestCase):
         self.thread(); self.event('task_started')
         m = Monitor(self.home); m.snapshot()
         self.write({'type':'response_item','payload':{'type':'function_call','name':'request_user_input','call_id':'ask'}})
-        self.assertEqual(self.status(m), 'waiting')
+        self.assertEqual(self.hidden_status(m), 'waiting')
         self.write({'type':'response_item','payload':{'type':'function_call_output','call_id':'ask'}})
         self.assertEqual(self.status(m), 'running')
 
@@ -145,7 +157,7 @@ class MonitorTests(unittest.TestCase):
         self.db.execute('DROP TABLE threads'); self.db.commit()
         snapshot = m.snapshot()
         self.assertTrue(snapshot['error'])
-        self.assertEqual(snapshot['sessions'][0]['status'], 'unknown')
+        self.assertEqual(snapshot['sessions'], [])
 
     @unittest.skipUnless(Path('/dev/fd').exists(), 'POSIX descriptor check')
     def test_repeated_reads_close_database_connections(self):
