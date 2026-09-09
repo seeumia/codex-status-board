@@ -12,6 +12,8 @@
 
 仓库中的 `codex-status-board/` 才是 Skill 目录，里面包括 `SKILL.md`、`scripts/`、`assets/` 和 `agents/`。Codex 的 skill-installer 可直接安装此 GitHub 子目录链接。不要只下载 SKILL.md；安装后在下一轮对话中说“打开开发状态看板”。如果客户端尚未刷新技能列表，也可直接执行下面的命令。
 
+如果安装器的直接下载遇到 Python 证书验证错误，可让 Codex 改用 skill-installer 的 `--method git` 安装方式；不需要关闭证书验证。
+
 Mac（默认技能目录）：
 
 ```sh

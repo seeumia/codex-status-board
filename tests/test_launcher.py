@@ -25,6 +25,7 @@ class LauncherTests(unittest.TestCase):
                 log = home/'session.jsonl'
                 log.write_text(json.dumps({'type':'event_msg','payload':{'type':'task_started','turn_id':'t1'}})+'\n', encoding='utf-8')
                 db.execute('INSERT INTO threads VALUES (?,?,?,?,?,?)', ('test','可移植会话','','vscode',0,str(log)))
+            db.close()
             with socket.socket() as sock:
                 sock.bind(('127.0.0.1', 0)); port = sock.getsockname()[1]
 
@@ -46,6 +47,7 @@ class LauncherTests(unittest.TestCase):
             home = Path(directory)
             with sqlite3.connect(home/'state_5.sqlite') as db:
                 db.execute('CREATE TABLE threads (id TEXT, name TEXT, title TEXT, source TEXT, archived INTEGER, rollout_path TEXT)')
+            db.close()
             with socket.socket() as sock:
                 sock.bind(('127.0.0.1', 0)); port = sock.getsockname()[1]
 
