@@ -1,6 +1,9 @@
 """Read Codex metadata and lifecycle records without changing its files."""
 import json
+import os
 import sqlite3
+import subprocess
+import sys
 import time
 from contextlib import closing
 from datetime import datetime
@@ -8,11 +11,27 @@ from pathlib import Path
 
 
 LABELS = {
-    'running': '正在开发', 'completed': '本轮结束', 'waiting': '等待你处理',
+    'running': '正在开发', 'completed': '本轮完成 · 待阅读', 'waiting': '等待你处理',
     'interrupted': '已中断', 'failed': '运行出错', 'unknown': '状态待确认',
 }
 BOUNDARIES = {'task_started', 'task_complete', 'turn_aborted'}
 MAX_TAIL = 16 * 1024 * 1024
+
+
+def selected_title():
+    """Keep a slow/inaccessible desktop from blocking lifecycle polling."""
+    if os.name != 'nt':
+        return None
+    try:
+        result = subprocess.run(
+            [sys.executable, '-X', 'utf8', str(Path(__file__).with_name('window_selection.py'))],
+            capture_output=True, encoding='utf-8', timeout=3,
+            creationflags=subprocess.CREATE_NO_WINDOW,
+        )
+        value = json.loads(result.stdout) if result.returncode == 0 else None
+        return value if isinstance(value, str) and value else None
+    except (OSError, ValueError, subprocess.TimeoutExpired):
+        return None
 
 
 def event_time(event):
@@ -145,12 +164,43 @@ class Rollout:
 
 
 class Monitor:
-    def __init__(self, codex_home):
+    def __init__(self, codex_home, selection_reader=None):
         self.home = Path(codex_home).expanduser().resolve()
-        self.started_at = time.time()
         self.readers = {}
-        self.shown = {}
-        self.initialized = False
+        self.selection_reader = selection_reader or selected_title
+        self.pending_path = self.home / 'cache/status-board/pending-reading.json'
+        try:
+            pending = json.loads(self.pending_path.read_text(encoding='utf-8'))
+            if not isinstance(pending, dict) or any(not isinstance(v, dict) for v in pending.values()):
+                raise ValueError('invalid pending reading state')
+            self.pending_reading = pending
+        except (OSError, ValueError):
+            self.pending_reading = {}
+        self.saved_pending = json.dumps(self.pending_reading, sort_keys=True)
+
+    def save_pending(self):
+        serialized = json.dumps(self.pending_reading, sort_keys=True)
+        if serialized == self.saved_pending:
+            return
+        self.pending_path.parent.mkdir(parents=True, exist_ok=True)
+        temporary = self.pending_path.with_suffix('.tmp')
+        temporary.write_text(serialized, encoding='utf-8')
+        temporary.replace(self.pending_path)
+        self.saved_pending = serialized
+
+    def unread_ids(self):
+        """Use the desktop's local unread flags; never infer reading from inactivity."""
+        try:
+            data = json.loads((self.home / '.codex-global-state.json').read_text(encoding='utf-8'))
+            hosts = data['electron-persisted-atom-state']['unread-thread-ids-by-host-v1']
+            if not isinstance(hosts, dict):
+                raise ValueError('invalid unread hosts')
+            ids = hosts.get('local', [])
+            if not isinstance(ids, list) or any(not isinstance(key, str) for key in ids):
+                raise ValueError('invalid unread ids')
+            return set(ids), None
+        except (OSError, ValueError, KeyError, TypeError):
+            return set(), '暂时无法读取 Codex 已读状态；仅显示运行项和看板已记住的待阅读项。'
 
     def metadata(self):
         candidates = [p for p in self.home.glob('state_*.sqlite') if p.stem[6:].isdigit()]
@@ -173,30 +223,63 @@ class Monitor:
             rows = self.metadata()
         except (sqlite3.Error, OSError, ValueError) as exc:
             note = str(exc) if isinstance(exc, ValueError) else '暂时无法读取 Codex 会话列表'
-            sessions = [{**s, 'status': 'unknown', 'label': LABELS['unknown'], 'note': note} for s in self.shown.values()]
-            return {'updated_at': now, 'error': note, 'sessions': sessions, 'warnings': 0}
+            return {'updated_at': now, 'error': note, 'sessions': [], 'warnings': 0}
+        unread, visibility_warning = self.unread_ids()
         live_ids = {row['id'] for row in rows}
-        self.shown = {k: v for k, v in self.shown.items() if k in live_ids}
         self.readers = {k: v for k, v in self.readers.items() if k in live_ids}
+        self.pending_reading = {k: v for k, v in self.pending_reading.items() if k in live_ids}
+        sessions = []
         warnings = 0
+        selection_fetched = False
+        selected_id = None
+
+        def current_selection():
+            nonlocal selection_fetched, selected_id
+            if not selection_fetched:
+                selection_fetched = True
+                title = self.selection_reader()
+                matches = [r['id'] for r in rows if title and
+                           (r['name'] or r['title'] or '').strip().split('\n')[0] == title]
+                # Accessibility exposes the title, not the UUID. Never guess on duplicates.
+                selected_id = matches[0] if len(matches) == 1 else None
+            return selected_id
+
         for row in rows:
             key = row['id']
             reader = self.readers.get(key)
-            prior_turn = reader.turn_id if reader else None
+            prior = (reader.status, reader.turn_id) if reader else None
             if not reader or reader.path != Path(row['rollout_path']):
                 reader = Rollout(row['rollout_path'])
                 self.readers[key] = reader
             status, note = reader.read(now)
-            new_turn = self.initialized and reader.turn_id and reader.turn_id != prior_turn
-            # Codex's started_at is second-resolution; compare at the same precision.
-            fresh = isinstance(reader.started_at, (int, float)) and reader.started_at >= int(self.started_at)
+            identity = {'turn': reader.turn_id, 'started_at': reader.started_at}
+            if reader.status != 'completed' or (
+                key in self.pending_reading and any(self.pending_reading[key].get(k) != v for k, v in identity.items())
+            ):
+                self.pending_reading.pop(key, None)
+            newly_completed = status == 'completed' and prior is not None and prior != ('completed', reader.turn_id)
+            if newly_completed and (key not in unread or current_selection() == key):
+                self.pending_reading[key] = identity
+            pending = self.pending_reading.get(key)
+            if status == 'completed' and pending is not None and not pending.get('acknowledged'):
+                current_id = current_selection()
+                if current_id is not None:
+                    if current_id != key:
+                        pending['left'] = True
+                    elif pending.get('left'):
+                        pending['acknowledged'] = True
             if status == 'unknown':
                 warnings += 1
-            if key in self.shown or reader.status == 'running' or (new_turn and fresh):
+            completed_visible = (not pending.get('acknowledged', False)) if pending is not None else key in unread
+            if status == 'running' or (status == 'completed' and completed_visible):
                 title = (row['name'] or row['title'] or '未命名会话').strip().split('\n')[0][:120]
-                self.shown[key] = {
+                sessions.append({
                     'id': key, 'title': title, 'status': status, 'label': LABELS[status],
                     'note': note, 'started_at': reader.started_at,
-                }
-        self.initialized = True
-        return {'updated_at': now, 'error': None, 'warnings': warnings, 'sessions': list(self.shown.values())}
+                })
+        try:
+            self.save_pending()
+        except OSError:
+            visibility_warning = '待阅读状态暂时无法保存，重启看板后可能丢失。'
+        return {'updated_at': now, 'error': None, 'warnings': warnings,
+                'visibility_warning': visibility_warning, 'sessions': sessions}
