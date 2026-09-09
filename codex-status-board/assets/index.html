@@ -25,7 +25,7 @@ footer{display:flex;justify-content:space-between;gap:14px;font-size:15px;color:
 <header><h1>Codex 开发状态</h1><span id="summary" aria-live="polite">正在连接…</span><button id="fullscreen" type="button">进入全屏</button></header>
 <div id="alert" role="status" hidden></div>
 <main id="board" aria-label="会话状态看板"></main>
-<footer><div class="legend"><span><i class="dot red"></i>开发中</span><span><i class="dot green"></i>本轮结束</span><span><i class="dot yellow"></i>需要关注</span></div><span id="updated">每 2 秒自动更新</span><span>绿色表示本轮结束，不代表项目验收</span></footer>
+<footer><div class="legend"><span><i class="dot red"></i>开发中</span><span><i class="dot green"></i>完成待阅读</span></div><span id="updated">每 2 秒自动更新</span><span>停留时完成会保留 · 切走再回来后移出 · 绿色不代表项目验收</span></footer>
 <script>
 'use strict';
 const board=document.querySelector('#board'), alertBox=document.querySelector('#alert');
@@ -77,19 +77,20 @@ function layout(){
   }
  }
 }
-function render(sessions,error=''){
+function render(sessions,error='',warning=''){
+ sessions=error?[]:sessions.filter(s=>s.status==='running'||s.status==='completed');
  lastSessions=sessions;hasError=Boolean(error);
- alertBox.hidden=!error;alertBox.textContent=error;
+ alertBox.hidden=!(error||warning);alertBox.textContent=error||warning;
  const counts={running:0,completed:0,attention:0};
  for(const s of sessions){if(!error&&s.status==='running')counts.running++;else if(!error&&s.status==='completed')counts.completed++;else counts.attention++;}
- summary.textContent=`${counts.running} 个开发中 · ${counts.completed} 个已结束`+(counts.attention?` · ${counts.attention} 个需关注`:'');
+ summary.textContent=error?'暂时无法确认状态':`${counts.running} 个开发中 · ${counts.completed} 个完成待阅读`;
  const key=JSON.stringify([sessions,error]);
  if(key!==renderKey){
   renderKey=key;board.replaceChildren();
   if(!sessions.length){
    const empty=document.createElement('section');empty.className='empty';
-   const title=document.createElement('h2');title.textContent=error?'暂时无法确认开发状态':'等待会话开始工作';
-   const text=document.createElement('p');text.textContent=error?'连接恢复后，看板会自动更新。':'新开始的会话会自动出现在这里，结束后保留绿色色块。';
+   const title=document.createElement('h2');title.textContent=error?'暂时无法确认开发状态':'暂无开发中或完成待阅读的任务';
+   const text=document.createElement('p');text.textContent=error?'连接恢复后，看板会自动更新。':'开始开发时自动显示，完成后仅保留未读任务。';
    empty.append(title,text);board.append(empty);
   }
   for(const session of sessions){
@@ -112,7 +113,7 @@ async function refresh(){
   const data=await response.json();
   if(!Array.isArray(data.sessions)||typeof data.updated_at!=='number')throw new Error('format');
   const stale=Date.now()/1000-data.updated_at>10;
-  lastSuccess=Date.now();render(data.sessions,data.error||(stale?'状态更新已暂停，请检查本机看板进程。':''));
+  lastSuccess=Date.now();render(data.sessions,data.error||(stale?'状态更新已暂停，请检查本机看板进程。':''),data.visibility_warning||'');
   updated.textContent='更新于 '+new Date(data.updated_at*1000).toLocaleTimeString('zh-CN',{hour12:false})+' · 每 2 秒刷新';
  }catch(_){render(lastSessions,'看板连接已中断，恢复后会自动更新。');updated.textContent='连接中断 · 正在重试';}
  finally{setTimeout(refresh,2000);}
