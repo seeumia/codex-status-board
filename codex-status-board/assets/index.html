@@ -1,0 +1,128 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>Codex 开发状态看板</title>
+<style>
+:root{color-scheme:dark;font-family:-apple-system,BlinkMacSystemFont,"PingFang SC","Microsoft YaHei",sans-serif;background:#121418;color:#fff}
+*{box-sizing:border-box}body{margin:0;height:100vh;height:100dvh;display:flex;flex-direction:column;padding:24px;gap:18px;overflow:hidden}
+header{display:flex;align-items:center;gap:24px;flex-wrap:wrap}h1{font-size:24px;letter-spacing:.04em;margin:0;font-weight:650}
+#summary{font-size:18px;color:#bbbfc7;margin-right:auto}button{font:inherit;font-size:17px;border:1px solid #666b75;border-radius:8px;background:#252930;color:#fff;padding:10px 20px;cursor:pointer}button:hover{background:#363c46}button:focus-visible{outline:3px solid white;outline-offset:3px}
+#alert{background:#704516;border:1px solid #d4953c;padding:12px 18px;font-size:20px;border-radius:8px}#alert[hidden]{display:none}
+main{flex:1;min-height:0;display:flex;flex-direction:column;gap:var(--tile-gap,18px)}
+.tile-row{flex:1;min-height:0;display:flex;gap:inherit}
+.tile{flex:1;border-radius:var(--tile-radius,14px);padding:var(--tile-padding,24px);display:flex;flex-direction:column;justify-content:center;min-width:0;min-height:0;overflow:hidden;position:relative}
+.running{background:#c52b36}.completed{background:#14713c}.waiting,.interrupted,.failed{background:#94590a}.unknown{background:#494d55}
+.tile h2{flex-shrink:0;font-size:var(--title-size,60px);line-height:1.22;overflow-wrap:anywhere;margin:0 0 .5em;font-weight:750;display:-webkit-box;-webkit-line-clamp:4;-webkit-box-orient:vertical;overflow:hidden}
+.state{flex-shrink:0;font-size:var(--state-size,28px);font-weight:600;display:flex;align-items:center;gap:.45em;line-height:1.3;white-space:nowrap}.symbol{font-size:1.15em}.note{flex-shrink:0;font-size:var(--note-size,18px);line-height:1.3;opacity:.9;margin-top:.5em}
+.empty{flex:1;min-height:0;display:flex;align-items:center;justify-content:center;text-align:center;flex-direction:column;color:#b5bac3;border:2px dashed #343a43;border-radius:14px;padding:32px}.empty h2{font-size:clamp(28px,4vw,56px);color:#e8ebef;margin:0 0 20px}.empty p{font-size:22px;margin:0;line-height:1.6}
+footer{display:flex;justify-content:space-between;gap:14px;font-size:15px;color:#b5bac3;flex-wrap:wrap}.legend{display:flex;gap:18px;align-items:center}.dot{width:12px;height:12px;display:inline-block;border-radius:50%;margin-right:7px}.red{background:#f2535d}.green{background:#45cd7b}.yellow{background:#e5aa51}
+@media(max-width:600px){body{padding:12px;gap:10px}header{gap:10px}h1{font-size:19px}#summary{font-size:15px}footer{font-size:12px}.legend{gap:10px}}
+</style>
+</head>
+<body>
+<header><h1>Codex 开发状态</h1><span id="summary" aria-live="polite">正在连接…</span><button id="fullscreen" type="button">进入全屏</button></header>
+<div id="alert" role="status" hidden></div>
+<main id="board" aria-label="会话状态看板"></main>
+<footer><div class="legend"><span><i class="dot red"></i>开发中</span><span><i class="dot green"></i>本轮结束</span><span><i class="dot yellow"></i>需要关注</span></div><span id="updated">每 2 秒自动更新</span><span>绿色表示本轮结束，不代表项目验收</span></footer>
+<script>
+'use strict';
+const board=document.querySelector('#board'), alertBox=document.querySelector('#alert');
+const summary=document.querySelector('#summary'), updated=document.querySelector('#updated');
+const symbols={running:'●',completed:'✓',waiting:'!',interrupted:'Ⅱ',failed:'!',unknown:'?'};
+let lastSessions=[], lastSuccess=0, renderKey='', hasError=false;
+function layout(){
+ const tiles=Array.from(board.querySelectorAll('.tile')),n=tiles.length;
+ if(!n)return;
+ const w=board.clientWidth,h=board.clientHeight;
+ if(w<=0||h<=0)return;
+ const rows=Math.max(1,Math.min(n,Math.round(Math.sqrt(n*h/w*1.4))));
+ const base=Math.floor(n/rows),extra=n%rows;
+ const gap=Math.min(18,w/Math.ceil(n/rows)*.05,h/rows*.05);
+ board.style.setProperty('--tile-gap',gap+'px');
+ // Balanced rows fill the full width, including an incomplete final row.
+ const key=n+':'+rows;
+ if(board.dataset.rowPlan!==key||!board.firstElementChild.classList.contains('tile-row')){
+  const fragment=document.createDocumentFragment();let offset=0;
+  for(let r=0;r<rows;r++){
+   const row=document.createElement('div');row.className='tile-row';
+   const count=base+(r<extra?1:0);
+   row.append(...tiles.slice(offset,offset+count));offset+=count;fragment.append(row);
+  }
+  board.replaceChildren(fragment);board.dataset.rowPlan=key;
+ }
+ const sizing=[];
+ for(const tile of tiles){
+  const count=tile.parentElement.children.length;
+  const tw=(w-gap*(count-1))/count,th=(h-gap*(rows-1))/rows,padding=Math.min(48,tw*.07,th*.1);
+  const innerW=Math.max(1,tw-2*padding),innerH=Math.max(1,th-2*padding);
+  tile.style.setProperty('--tile-padding',padding+'px');
+  tile.style.setProperty('--tile-radius',Math.min(14,tw*.04,th*.04)+'px');
+  tile.style.setProperty('--state-size',Math.min(38,innerW/8,innerH/6)+'px');
+  tile.style.setProperty('--note-size',Math.min(20,innerW/18,innerH/9)+'px');
+  const size=Math.min(94,innerW/7,innerH/3.5);
+  tile.style.setProperty('--title-size',size+'px');
+  sizing.push({tile,size,innerH});
+ }
+ // Apply all padding first: changing one flex item's padding can resize its siblings.
+ for(const item of sizing){
+  const {tile,innerH}=item;let size=item.size;
+  const title=tile.querySelector('h2'),state=tile.querySelector('.state'),note=tile.querySelector('.note');
+  // Shrink long titles to keep the name and state inside even a small tile.
+  for(let i=0;i<20;i++){
+   const used=title.getBoundingClientRect().height+size*.5+state.getBoundingClientRect().height+(note?note.getBoundingClientRect().height+parseFloat(getComputedStyle(note).marginTop):0);
+   if(used<=innerH)break;
+   size*=.85;tile.style.setProperty('--title-size',size+'px');
+  }
+ }
+}
+function render(sessions,error=''){
+ lastSessions=sessions;hasError=Boolean(error);
+ alertBox.hidden=!error;alertBox.textContent=error;
+ const counts={running:0,completed:0,attention:0};
+ for(const s of sessions){if(!error&&s.status==='running')counts.running++;else if(!error&&s.status==='completed')counts.completed++;else counts.attention++;}
+ summary.textContent=`${counts.running} 个开发中 · ${counts.completed} 个已结束`+(counts.attention?` · ${counts.attention} 个需关注`:'');
+ const key=JSON.stringify([sessions,error]);
+ if(key!==renderKey){
+  renderKey=key;board.replaceChildren();
+  if(!sessions.length){
+   const empty=document.createElement('section');empty.className='empty';
+   const title=document.createElement('h2');title.textContent=error?'暂时无法确认开发状态':'等待会话开始工作';
+   const text=document.createElement('p');text.textContent=error?'连接恢复后，看板会自动更新。':'新开始的会话会自动出现在这里，结束后保留绿色色块。';
+   empty.append(title,text);board.append(empty);
+  }
+  for(const session of sessions){
+   const status=error?'unknown':(Object.hasOwn(symbols,session.status)?session.status:'unknown');
+   const tile=document.createElement('article');tile.className='tile '+status;tile.dataset.sessionId=session.id;tile.dataset.status=status;
+   const name=document.createElement('h2');name.textContent=session.title;name.title=session.title;
+   const state=document.createElement('div');state.className='state';
+   const icon=document.createElement('span');icon.className='symbol';icon.setAttribute('aria-hidden','true');icon.textContent=symbols[status];
+   const label=document.createElement('span');label.textContent=error?'状态待确认':session.label;state.append(icon,label);tile.append(name,state);
+   if(session.note&&!error){const note=document.createElement('div');note.className='note';note.textContent=session.note;tile.append(note);}
+   board.append(tile);
+  }
+ }
+ layout();
+}
+async function refresh(){
+ try{
+  const response=await fetch('/api/snapshot',{cache:'no-store',signal:AbortSignal.timeout(5000)});
+  if(!response.ok)throw new Error('HTTP');
+  const data=await response.json();
+  if(!Array.isArray(data.sessions)||typeof data.updated_at!=='number')throw new Error('format');
+  const stale=Date.now()/1000-data.updated_at>10;
+  lastSuccess=Date.now();render(data.sessions,data.error||(stale?'状态更新已暂停，请检查本机看板进程。':''));
+  updated.textContent='更新于 '+new Date(data.updated_at*1000).toLocaleTimeString('zh-CN',{hour12:false})+' · 每 2 秒刷新';
+ }catch(_){render(lastSessions,'看板连接已中断，恢复后会自动更新。');updated.textContent='连接中断 · 正在重试';}
+ finally{setTimeout(refresh,2000);}
+}
+setInterval(()=>{if(lastSuccess&&Date.now()-lastSuccess>9000&&!hasError)render(lastSessions,'看板连接已中断，恢复后会自动更新。');},1000);
+const fullscreen=document.querySelector('#fullscreen');
+fullscreen.addEventListener('click',async()=>{try{if(document.fullscreenElement)await document.exitFullscreen();else await document.documentElement.requestFullscreen();}catch(_){alertBox.hidden=false;alertBox.textContent='当前窗口不支持网页全屏，请使用浏览器的全屏功能。';}});
+document.addEventListener('fullscreenchange',()=>{fullscreen.textContent=document.fullscreenElement?'退出全屏':'进入全屏';layout();});
+window.addEventListener('resize',layout);document.addEventListener('visibilitychange',()=>{if(document.visibilityState==='visible'&&Date.now()-lastSuccess>9000)render(lastSessions,'正在重新确认状态…');});
+refresh();
+</script>
+</body>
+</html>
